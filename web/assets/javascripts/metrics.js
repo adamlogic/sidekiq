@@ -1,14 +1,13 @@
-if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-  Chart.defaults.borderColor = "#333"
-  Chart.defaults.color = "#aaa"
+if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
+  Chart.defaults.borderColor = "#333";
+  Chart.defaults.color = "#aaa";
 }
 
-class BaseChart {
-  constructor(id, options) {
-    this.ctx = document.getElementById(id);
-    this.options = options
-    this.fallbackColor = "#999";
-    this.colors = [
+class Colors {
+  constructor() {
+    this.assigments = {};
+    this.fallback = "#999";
+    this.available = [
       // Colors taken from https://www.chartjs.org/docs/latest/samples/utils.html
       "#537bc4",
       "#4dc9f6",
@@ -21,6 +20,32 @@ class BaseChart {
       "#8549ba",
       "#991b1b",
     ];
+    this.primary = this.available[0];
+  }
+
+  checkOutFor(assignee) {
+    const color =
+      this.assigments[assignee] || this.available.shift() || this.fallback;
+    this.assigments[assignee] = color;
+    return color;
+  }
+
+  checkInFor(assignee) {
+    const color = this.assigments[assignee];
+    delete this.assigments[assignee];
+
+    if (color && color != this.fallback) {
+      this.available.unshift(color);
+    }
+  }
+}
+
+class BaseChart {
+  constructor(id, options) {
+    this.ctx = document.getElementById(id);
+    this.visibleKls = options.visible;
+    this.options = options;
+    this.colors = new Colors();
 
     this.chart = new Chart(this.ctx, {
       type: this.options.chartType,
@@ -29,16 +54,42 @@ class BaseChart {
     });
   }
 
-  addMarksToChart() {
-    this.options.marks.forEach(([bucket, label], i) => {
-      this.chart.options.plugins.annotation.annotations[`deploy-${i}`] = {
-        type: "line",
-        xMin: bucket,
-        xMax: bucket,
-        borderColor: "rgba(220, 38, 38, 0.4)",
-        borderWidth: 2,
-      };
-    });
+  update() {
+    this.chart.options = this.chartOptions;
+    this.chart.update();
+  }
+
+  get chartOptions() {
+    return {
+      interaction: {
+        mode: "x",
+      },
+    };
+  }
+
+  get plugins() {
+    const plugins = {
+      legend: {
+        display: false,
+      },
+      annotation: {
+        annotations: {},
+      },
+    };
+
+    if (this.options.marks) {
+      this.options.marks.forEach(([bucket, label], i) => {
+        plugins.annotation.annotations[`deploy-${i}`] = {
+          type: "line",
+          xMin: bucket,
+          xMax: bucket,
+          borderColor: "rgba(220, 38, 38, 0.4)",
+          borderWidth: 2,
+        };
+      });
+    }
+
+    return plugins;
   }
 }
 
@@ -47,13 +98,56 @@ class JobMetricsOverviewChart extends BaseChart {
     super(id, { ...options, chartType: "line" });
     this.swatches = [];
 
-    this.addMarksToChart();
-    this.chart.update();
+    this.update();
+  }
+
+  get currentSeries() {
+    return this.options.series[this.metric];
+  }
+
+  get datasets() {
+    return Object.entries(this.currentSeries)
+      .filter(([kls, _]) => this.visibleKls.includes(kls))
+      .map(([kls, _]) => this.buildDataset(kls));
+  }
+
+  get metric() {
+    return this._metric || this.options.initialMetric;
+  }
+
+  set metric(m) {
+    this._metric = m;
+  }
+
+  selectMetric(metric) {
+    this.metric = metric;
+    for (const el of document.querySelectorAll("a[data-show-metric]")) {
+      this.updateMetricSelector(el);
+    }
+    this.chart.data.datasets = this.datasets;
+    this.update();
+  }
+
+  updateMetricSelector(el) {
+    const isCurrent = el.getAttribute("data-show-metric") == this.metric;
+    el.classList.toggle("current-chart", isCurrent);
+  }
+
+  registerMetricSelector(el) {
+    this.updateMetricSelector(el);
+    el.addEventListener("click", (e) => {
+      e.preventDefault();
+      this.selectMetric(e.target.getAttribute("data-show-metric"));
+      this.sortTableBody(
+        e.target.closest("table").querySelector("tbody"),
+        [...e.target.closest("tr").children].indexOf(e.target.closest("th"))
+      );
+    });
   }
 
   registerSwatch(id) {
     const el = document.getElementById(id);
-    el.onchange = () => this.toggle(el.value, el.checked);
+    el.addEventListener("change", () => this.toggleKls(el.value, el.checked));
     this.swatches[el.value] = el;
     this.updateSwatch(el.value);
   }
@@ -65,25 +159,41 @@ class JobMetricsOverviewChart extends BaseChart {
     el.style.color = ds ? ds.borderColor : null;
   }
 
-  toggle(kls, visible) {
+  toggleKls(kls, visible) {
     if (visible) {
-      this.chart.data.datasets.push(this.dataset(kls));
+      this.chart.data.datasets.push(this.buildDataset(kls));
     } else {
       const i = this.chart.data.datasets.findIndex((ds) => ds.label == kls);
-      this.colors.unshift(this.chart.data.datasets[i].borderColor);
+      this.colors.checkInFor(kls);
       this.chart.data.datasets.splice(i, 1);
     }
 
     this.updateSwatch(kls);
-    this.chart.update();
+    this.update();
   }
 
-  dataset(kls) {
-    const color = this.colors.shift() || this.fallbackColor;
+  sortTableBody(tbody, colNo) {
+    const [...rows] = tbody.querySelectorAll("tr");
+
+    rows.sort((r1, r2) => {
+      const val1 = parseFloat(r1.children[colNo].innerText);
+      const val2 = parseFloat(r2.children[colNo].innerText);
+
+      // Sorting highest to lowest
+      return val2 - val1;
+    });
+
+    for (const row of rows) {
+      tbody.append(row);
+    }
+  }
+
+  buildDataset(kls) {
+    const color = this.colors.checkOutFor(kls);
 
     return {
       label: kls,
-      data: this.options.series[kls],
+      data: this.currentSeries[kls],
       borderColor: color,
       backgroundColor: color,
       borderWidth: 2,
@@ -91,36 +201,28 @@ class JobMetricsOverviewChart extends BaseChart {
     };
   }
 
-  get datasets() {
-    return Object.entries(this.options.series)
-      .filter(([kls, _]) => this.options.visible.includes(kls))
-      .map(([kls, _]) => this.dataset(kls));
-  }
-
   get chartOptions() {
     return {
+      ...super.chartOptions,
       aspectRatio: 4,
       scales: {
         y: {
           beginAtZero: true,
           title: {
-            text: "Total execution time (sec)",
+            text: this.options.metricLabels[this.metric],
             display: true,
           },
         },
       },
-      interaction: {
-        mode: "x",
-      },
       plugins: {
-        legend: {
-          display: false,
-        },
+        ...this.plugins,
         tooltip: {
           callbacks: {
             title: (items) => `${items[0].label} UTC`,
             label: (item) =>
-              `${item.dataset.label}: ${item.parsed.y.toFixed(1)} seconds`,
+              `${item.dataset.label}: ${item.parsed.y.toFixed(1)} ${
+                this.options.metricUnits[this.metric]
+              }`,
             footer: (items) => {
               const bucket = items[0].label;
               const marks = this.options.marks.filter(([b, _]) => b == bucket);
@@ -139,15 +241,18 @@ class HistTotalsChart extends BaseChart {
   }
 
   get datasets() {
-    return [{
-      data: this.options.series,
-      backgroundColor: this.colors[0],
-      borderWidth: 0,
-    }];
+    return [
+      {
+        data: this.options.series,
+        backgroundColor: this.colors.primary,
+        borderWidth: 0,
+      },
+    ];
   }
 
   get chartOptions() {
     return {
+      ...super.chartOptions,
       aspectRatio: 6,
       scales: {
         y: {
@@ -158,13 +263,8 @@ class HistTotalsChart extends BaseChart {
           },
         },
       },
-      interaction: {
-        mode: "x",
-      },
       plugins: {
-        legend: {
-          display: false,
-        },
+        ...this.plugins,
         tooltip: {
           callbacks: {
             label: (item) => `${item.parsed.y} jobs`,
@@ -179,8 +279,7 @@ class HistBubbleChart extends BaseChart {
   constructor(id, options) {
     super(id, { ...options, chartType: "bubble" });
 
-    this.addMarksToChart();
-    this.chart.update();
+    this.update();
   }
 
   get datasets() {
@@ -195,8 +294,9 @@ class HistBubbleChart extends BaseChart {
             // histogram data is ordered fastest to slowest, but this.histIntervals is
             // slowest to fastest (so it displays correctly on the chart).
             y:
-              this.options.histIntervals[this.options.histIntervals.length - 1 - histBucket] /
-              1000,
+              this.options.histIntervals[
+                this.options.histIntervals.length - 1 - histBucket
+              ] / 1000,
             count: count,
           });
 
@@ -207,21 +307,24 @@ class HistBubbleChart extends BaseChart {
 
     // Chart.js will not calculate the bubble size. We have to do that.
     const maxRadius = this.ctx.offsetWidth / this.options.labels.length;
-    const minRadius = 1
+    const minRadius = 1;
     const multiplier = (maxRadius / maxCount) * 1.5;
     data.forEach((entry) => {
       entry.r = entry.count * multiplier + minRadius;
     });
 
-    return [{
-      data: data,
-      backgroundColor: "#537bc4",
-      borderColor: "#537bc4",
-    }];
+    return [
+      {
+        data: data,
+        backgroundColor: this.colors.primary,
+        borderColor: this.colors.primary,
+      },
+    ];
   }
 
   get chartOptions() {
     return {
+      ...super.chartOptions,
       aspectRatio: 3,
       scales: {
         x: {
@@ -235,13 +338,8 @@ class HistBubbleChart extends BaseChart {
           },
         },
       },
-      interaction: {
-        mode: "x",
-      },
       plugins: {
-        legend: {
-          display: false,
-        },
+        ...this.plugins,
         tooltip: {
           callbacks: {
             title: (items) => `${items[0].raw.x} UTC`,
